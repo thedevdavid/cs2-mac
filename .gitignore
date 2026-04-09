@@ -1,0 +1,12 @@
+bin/
+obj/
+*.dll
+*.dll.backup
+*.exe
+*.exe.disabled
+.claude/
+*.user
+*.suo
+.vs/
+.idea/
+.DS_Store
