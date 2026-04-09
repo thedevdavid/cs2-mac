@@ -1,6 +1,6 @@
 # Cities: Skylines II - CrossOver macOS Patcher
 
-> **v1.0.0** | Compatible with CS2 **v1.5.6f1** (Bridges & Ports) | CrossOver **26.0+**
+> **v1.1.0** | Compatible with CS2 **v1.5.6f1** (Bridges & Ports) | CrossOver **26.0+**
 
 Run Cities: Skylines II on macOS using CrossOver. This patcher fixes Wine/CrossOver compatibility issues by patching game DLLs and configuring the Wine bottle.
 
@@ -47,17 +47,18 @@ Steam updates overwrite patched DLLs and `boot.config`. **Re-run the patcher aft
 
 | CS2 Version | Patcher Version | Status |
 |-------------|-----------------|--------|
+| v1.5.6f1 (Bridges & Ports) | v1.1.0 | Tested and working |
 | v1.5.6f1 (Bridges & Ports) | v1.0.0 | Tested and working |
 
 Future CS2 updates may shift IL offsets in patched DLLs. If the patcher reports warnings after an update, a new patcher version may be needed.
 
 ## What It Patches
 
-### DLL Patches (4 DLLs, 10 patches)
+### DLL Patches (4 DLLs, 11 patches)
 
 | DLL | Patches | Issue |
 |-----|---------|-------|
-| `Colossal.IO.dll` | 2 | Wine's `FindNextFile` returns wrong error code, crashing game init |
+| `Colossal.IO.dll` | 3 | Wine's `FindNextFile` returns wrong error code; `LongPath.AddLongPathPrefix` prepends `\\?\` to paths which Wine's `CreateFileW`/`RemoveDirectory` can't handle |
 | `PDX.SDK.dll` | 7 | Wine's filesystem APIs broken: directory listing, deletion, creation, file I/O |
 | `Colossal.IO.AssetDatabase.dll` | 1 | Wine's `File.Exists` returns true for non-existent `.priority` file |
 | `Backtrace.Unity.dll` | 1 | Wine file locking causes sharing violations in crash reporter |
@@ -76,12 +77,14 @@ The Paradox SDK has two code paths for filesystem operations: standard .NET (`Sy
 | `boot.config` | `gfx-enable-gfx-jobs=0` | Reduces D3DMetal threading pressure |
 | `system.reg` | `LongPathsEnabled=1` | Helps Wine's `\\?\` path handling |
 | `cxbottle.conf` | `UNITY_DISABLE_GRAPHICS_JOBS=1` | Additional D3DMetal stability |
+| `cxbottle.conf` | `WINEDEBUG=-all` | Suppress Wine debug I/O during heavy mod loading |
+| `cxbottle.conf` | `MONO_GC_PARAMS=max-heap-size=4096m` | Larger Mono heap for loading many mod assemblies |
 | `UnityCrashHandler64.exe` | Renamed to `.disabled` | Prevents hung-crash under Wine |
 
 ## Known Limitations
 
 - **Performance**: Expect lower FPS than Windows due to D3DMetal translation + Rosetta 2 (Apple Silicon)
-- **Mods**: Paradox Mods download and work; some complex mods may have Wine-specific issues
+- **Mods**: Paradox Mods download and work; mods that call `File.Delete` directly may fail under Wine with `IOException` (same Wine bug the patcher fixes in game DLLs, but in mod code we can't patch). Disable problematic mods if they cause crashes during playset loading.
 - **Quit**: Game may need force-quit occasionally
 - **Editor.coc**: Settings file read error on startup (cosmetic, non-blocking)
 

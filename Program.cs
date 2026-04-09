@@ -53,7 +53,7 @@ var resolver = new DefaultAssemblyResolver();
 resolver.AddSearchDirectory(managedPath);
 var readerParams = new ReaderParameters { AssemblyResolver = resolver, InMemory = true };
 
-// --- Patch 1: Colossal.IO.dll (FindNextFile error handling) ---
+// --- Patches 1, 11: Colossal.IO.dll (FindNextFile error handling + LongPath prefix) ---
 totalPatches += PatchColossalIO(Path.Combine(managedPath, "Colossal.IO.dll"), readerParams);
 
 // --- Patches 2-8: PDX.SDK.dll (Win32 long path fixes + IsLongPath + CreateFileStream) ---
@@ -75,7 +75,7 @@ PatchBootConfig(bootConfigPath);
 // --- Registry: LongPathsEnabled ---
 PatchRegistry(systemRegPath);
 
-// --- Bottle env: UNITY_DISABLE_GRAPHICS_JOBS ---
+// --- Bottle env: UNITY_DISABLE_GRAPHICS_JOBS, WINEDEBUG, MONO_GC_PARAMS ---
 PatchBottleConf(bottleConfPath);
 
 // --- Crash handler: Rename ---
@@ -94,7 +94,7 @@ Console.WriteLine("Launch CS2 through CrossOver to test.");
 
 int PatchColossalIO(string dllPath, ReaderParameters rp)
 {
-    Console.WriteLine("[Colossal.IO.dll] Patching FindNextFile error handling...");
+    Console.WriteLine("[Colossal.IO.dll] Patching FindNextFile error handling + LongPath prefix...");
     if (!BackupAndLoad(dllPath, rp, out var asm)) return 0;
 
     int count = 0;
@@ -124,6 +124,34 @@ int PatchColossalIO(string dllPath, ReaderParameters rp)
                 }
             }
         }
+    }
+
+    // Patch 11: LongPath.AddLongPathPrefix → no-op (return input path unchanged)
+    // Wine's CreateFileW and RemoveDirectoryW fail with \\?\ prefix paths.
+    // This method prepends \\?\ to every path before Win32 API calls.
+    // CS2 paths under Wine never exceed 260 chars, so the prefix is unnecessary.
+    // Fixes: .coc settings read errors for all mods, LongFile.OpenRead failures,
+    // "IOException: Success" from GetFileHandle with \\?\ prefix.
+    var longPathType = asm!.MainModule.Types.FirstOrDefault(t => t.Name == "LongPath" && t.Namespace == "System.IO");
+    var addPrefix = longPathType?.Methods.FirstOrDefault(m => m.Name == "AddLongPathPrefix");
+    if (addPrefix != null)
+    {
+        var instrs = addPrefix.Body.Instructions;
+        instrs[0].OpCode = OpCodes.Ldarg_0;
+        instrs[0].Operand = null;
+        instrs[1].OpCode = OpCodes.Ret;
+        instrs[1].Operand = null;
+        for (int i = 2; i < instrs.Count; i++)
+        {
+            instrs[i].OpCode = OpCodes.Nop;
+            instrs[i].Operand = null;
+        }
+        Console.WriteLine("  Patched LongPath.AddLongPathPrefix: no-op (skip \\\\?\\\\ prefix for Wine)");
+        count++;
+    }
+    else
+    {
+        Console.WriteLine("  WARN: LongPath.AddLongPathPrefix not found");
     }
 
     if (count > 0) SaveAssembly(asm!, dllPath);
@@ -477,36 +505,54 @@ void PatchBottleConf(string path)
     if (!File.Exists(path)) { Console.WriteLine("[cxbottle.conf] SKIP: not found"); return; }
 
     var content = File.ReadAllText(path);
-    if (content.Contains("UNITY_DISABLE_GRAPHICS_JOBS"))
-    {
-        Console.WriteLine("[cxbottle.conf] UNITY_DISABLE_GRAPHICS_JOBS already set");
-        return;
-    }
+    var original = content;
 
-    // Primary: insert after CX_GRAPHICS_BACKEND = d3dmetal
-    var patched = content.Replace(
-        "\"CX_GRAPHICS_BACKEND\" = \"d3dmetal\"",
-        "\"CX_GRAPHICS_BACKEND\" = \"d3dmetal\"\n\"UNITY_DISABLE_GRAPHICS_JOBS\" = \"1\""
-    );
+    // Each env var: check if already present, add if not
+    string[][] envVars =
+    [
+        ["UNITY_DISABLE_GRAPHICS_JOBS", "1"],
+        ["WINEDEBUG", "-all"],
+        ["MONO_GC_PARAMS", "max-heap-size=4096m"],
+    ];
 
-    // Fallback: insert after [EnvironmentVariables] section header
-    if (patched == content)
+    foreach (var ev in envVars)
     {
-        patched = content.Replace(
-            "[EnvironmentVariables]",
-            "[EnvironmentVariables]\n\"UNITY_DISABLE_GRAPHICS_JOBS\" = \"1\""
+        if (content.Contains(ev[0]))
+        {
+            Console.WriteLine($"[cxbottle.conf] {ev[0]} already set");
+            continue;
+        }
+
+        var line = $"\"{ev[0]}\" = \"{ev[1]}\"";
+
+        // Primary: insert after CX_GRAPHICS_BACKEND line
+        var patched = content.Replace(
+            "\"CX_GRAPHICS_BACKEND\" = \"d3dmetal\"",
+            $"\"CX_GRAPHICS_BACKEND\" = \"d3dmetal\"\n{line}"
         );
+
+        // Fallback: insert after [EnvironmentVariables] section header
+        if (patched == content)
+        {
+            patched = content.Replace(
+                "[EnvironmentVariables]",
+                $"[EnvironmentVariables]\n{line}"
+            );
+        }
+
+        if (patched != content)
+        {
+            content = patched;
+            Console.WriteLine($"[cxbottle.conf] Added {ev[0]}={ev[1]}");
+        }
+        else
+        {
+            Console.WriteLine($"[cxbottle.conf] WARN: Could not find insertion point for {ev[0]}");
+        }
     }
 
-    if (patched != content)
-    {
-        File.WriteAllText(path, patched);
-        Console.WriteLine("[cxbottle.conf] Added UNITY_DISABLE_GRAPHICS_JOBS=1");
-    }
-    else
-    {
-        Console.WriteLine("[cxbottle.conf] WARN: Could not find insertion point");
-    }
+    if (content != original)
+        File.WriteAllText(path, content);
 }
 
 void DisableCrashHandler(string path)
