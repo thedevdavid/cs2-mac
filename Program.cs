@@ -10,14 +10,24 @@ using System.Linq;
 /// Patches Cities: Skylines II DLLs and config to fix Wine/CrossOver compatibility issues.
 /// All issues stem from Wine's incomplete Win32 filesystem API implementation.
 ///
-/// Usage: dotnet run -- "/path/to/CrossOver/Bottles/BottleName"
+/// Usage:
+///   dotnet run -- "/path/to/CrossOver/Bottles/BottleName"
+///   dotnet run -- --rollback "/path/to/CrossOver/Bottles/BottleName"
 /// </summary>
 
-var bottlePath = args.Length > 0 ? args[0] : "";
+var isRollback = args.Length >= 1 && args[0] == "--rollback";
+var bottlePath = isRollback
+    ? (args.Length >= 2 ? args[1] : "")
+    : (args.Length > 0 ? args[0] : "");
+
 if (string.IsNullOrEmpty(bottlePath) || !Directory.Exists(bottlePath))
 {
     Console.Error.WriteLine("CS2 CrossOver Patcher");
-    Console.Error.WriteLine("Usage: dotnet run -- \"/path/to/CrossOver/Bottles/Steam\"");
+    Console.Error.WriteLine();
+    Console.Error.WriteLine("Usage:");
+    Console.Error.WriteLine("  dotnet run -- \"/path/to/CrossOver/Bottles/Steam\"");
+    Console.Error.WriteLine("  dotnet run -- --rollback \"/path/to/CrossOver/Bottles/Steam\"");
+    Console.Error.WriteLine();
     Console.Error.WriteLine("  e.g. dotnet run -- \"$HOME/Library/Application Support/CrossOver/Bottles/Steam\"");
     Environment.Exit(1);
 }
@@ -36,6 +46,12 @@ if (!Directory.Exists(managedPath))
     Console.Error.WriteLine($"ERROR: CS2 not found at {gamePath}");
     Console.Error.WriteLine("Make sure Cities: Skylines II is installed in this bottle.");
     Environment.Exit(1);
+}
+
+if (isRollback)
+{
+    RollbackAll();
+    return;
 }
 
 Console.WriteLine("=== CS2 CrossOver macOS Patcher ===");
@@ -75,7 +91,7 @@ PatchBootConfig(bootConfigPath);
 // --- Registry: LongPathsEnabled ---
 PatchRegistry(systemRegPath);
 
-// --- Bottle env: UNITY_DISABLE_GRAPHICS_JOBS, WINEDEBUG, MONO_GC_PARAMS ---
+// --- Bottle env: UNITY_DISABLE_GRAPHICS_JOBS, WINEDEBUG ---
 PatchBottleConf(bottleConfPath);
 
 // --- Crash handler: Rename ---
@@ -132,20 +148,25 @@ int PatchColossalIO(string dllPath, ReaderParameters rp)
     // CS2 paths under Wine never exceed 260 chars, so the prefix is unnecessary.
     // Fixes: .coc settings read errors for all mods, LongFile.OpenRead failures,
     // "IOException: Success" from GetFileHandle with \\?\ prefix.
+    //
+    // v1.1.1: Clean ILProcessor rebuild — Clear() all three body collections,
+    // append `ldarg.0; ret`, set MaxStackSize=1. The v1.1.0 NOP-in-place approach
+    // left orphaned ExceptionHandlers, stale MaxStackSize (3), and dangling branch
+    // metadata that Mono's IL verifier rejected with
+    // `InvalidProgramException: Invalid IL code in System.IO.LongPath:AddLongPathPrefix
+    // (string): IL_0017: nop`, which cascaded into GameManager NREs.
     var longPathType = asm!.MainModule.Types.FirstOrDefault(t => t.Name == "LongPath" && t.Namespace == "System.IO");
     var addPrefix = longPathType?.Methods.FirstOrDefault(m => m.Name == "AddLongPathPrefix");
     if (addPrefix != null)
     {
-        var instrs = addPrefix.Body.Instructions;
-        instrs[0].OpCode = OpCodes.Ldarg_0;
-        instrs[0].Operand = null;
-        instrs[1].OpCode = OpCodes.Ret;
-        instrs[1].Operand = null;
-        for (int i = 2; i < instrs.Count; i++)
-        {
-            instrs[i].OpCode = OpCodes.Nop;
-            instrs[i].Operand = null;
-        }
+        var body = addPrefix.Body;
+        body.Instructions.Clear();
+        body.ExceptionHandlers.Clear();
+        body.Variables.Clear();
+        var il = body.GetILProcessor();
+        il.Append(il.Create(OpCodes.Ldarg_0));
+        il.Append(il.Create(OpCodes.Ret));
+        body.MaxStackSize = 1;
         Console.WriteLine("  Patched LongPath.AddLongPathPrefix: no-op (skip \\\\?\\\\ prefix for Wine)");
         count++;
     }
@@ -512,7 +533,6 @@ void PatchBottleConf(string path)
     [
         ["UNITY_DISABLE_GRAPHICS_JOBS", "1"],
         ["WINEDEBUG", "-all"],
-        ["MONO_GC_PARAMS", "max-heap-size=4096m"],
     ];
 
     foreach (var ev in envVars)
@@ -561,4 +581,85 @@ void DisableCrashHandler(string path)
 
     File.Move(path, path + ".disabled", overwrite: true);
     Console.WriteLine("[UnityCrashHandler64] Renamed to .disabled");
+}
+
+// ============================================================
+// Rollback Mode
+// ============================================================
+
+void RollbackAll()
+{
+    Console.WriteLine("=== CS2 CrossOver macOS Patcher — ROLLBACK MODE ===");
+    Console.WriteLine($"Bottle: {bottlePath}");
+    Console.WriteLine($"Game:   {gamePath}");
+    Console.WriteLine();
+
+    int restored = 0;
+
+    // Restore DLL backups
+    string[] dlls = ["Colossal.IO.dll", "PDX.SDK.dll", "Colossal.IO.AssetDatabase.dll", "Backtrace.Unity.dll"];
+    foreach (var dll in dlls)
+    {
+        if (RestoreFromBackup(Path.Combine(managedPath, dll))) restored++;
+    }
+
+    // Restore boot.config
+    if (RestoreFromBackup(bootConfigPath)) restored++;
+
+    // Revert cxbottle.conf: strip WINEDEBUG and MONO_GC_PARAMS lines
+    if (RollbackBottleConf(bottleConfPath)) restored++;
+
+    // Restore UnityCrashHandler64.exe
+    var disabledCrashHandler = crashHandlerPath + ".disabled";
+    if (File.Exists(disabledCrashHandler))
+    {
+        File.Move(disabledCrashHandler, crashHandlerPath, overwrite: true);
+        Console.WriteLine("[UnityCrashHandler64.exe] Restored from .disabled");
+        restored++;
+    }
+    else
+    {
+        Console.WriteLine("[UnityCrashHandler64.exe] Already in place (or never disabled)");
+    }
+
+    Console.WriteLine();
+    Console.WriteLine($"=== Rollback complete: {restored} item(s) restored ===");
+    Console.WriteLine("Backup files preserved so a subsequent normal run can re-patch cleanly.");
+}
+
+bool RestoreFromBackup(string path)
+{
+    var backup = path + ".backup";
+    if (!File.Exists(backup))
+    {
+        Console.WriteLine($"[{Path.GetFileName(path)}] No backup found, skipping");
+        return false;
+    }
+    File.Copy(backup, path, overwrite: true);
+    Console.WriteLine($"[{Path.GetFileName(path)}] Restored from backup");
+    return true;
+}
+
+bool RollbackBottleConf(string path)
+{
+    if (!File.Exists(path))
+    {
+        Console.WriteLine("[cxbottle.conf] SKIP: not found");
+        return false;
+    }
+    var content = File.ReadAllText(path);
+    var lines = content.Split('\n');
+    var filtered = lines
+        .Where(l => !l.Contains("\"WINEDEBUG\"") && !l.Contains("\"MONO_GC_PARAMS\""))
+        .ToArray();
+    var patched = string.Join("\n", filtered);
+
+    if (patched != content)
+    {
+        File.WriteAllText(path, patched);
+        Console.WriteLine("[cxbottle.conf] Removed WINEDEBUG and MONO_GC_PARAMS lines");
+        return true;
+    }
+    Console.WriteLine("[cxbottle.conf] No WINEDEBUG/MONO_GC_PARAMS lines to remove");
+    return false;
 }

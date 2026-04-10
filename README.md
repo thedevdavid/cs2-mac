@@ -1,8 +1,10 @@
 # Cities: Skylines II - CrossOver macOS Patcher
 
-> **v1.1.0** | Compatible with CS2 **v1.5.6f1** (Bridges & Ports) | CrossOver **26.0+**
+> **v1.1.1** | Compatible with CS2 **v1.5.6f1** (Bridges & Ports) | CrossOver **26.0+**
 
 Run Cities: Skylines II on macOS using CrossOver. This patcher fixes Wine/CrossOver compatibility issues by patching game DLLs and configuring the Wine bottle.
+
+> **WARNING:** v1.1.0 is broken and makes the game unplayable (`GameManager` `NullReferenceException` cascade caused by malformed IL in Patch 11). If you already applied v1.1.0, run the rollback command below before applying v1.1.1. See `CHANGELOG.md` for details.
 
 ## Prerequisites
 
@@ -39,6 +41,16 @@ dotnet run --project . -- "$HOME/Library/Application Support/CrossOver/Bottles/S
 
 The patcher is **idempotent** — safe to run multiple times. It restores from backups before patching.
 
+### Rollback
+
+If you need to revert the patcher's changes (for example, to recover from a bad release like v1.1.0):
+
+```bash
+dotnet run --project . -- --rollback "$HOME/Library/Application Support/CrossOver/Bottles/Steam"
+```
+
+This restores every `.backup` file over its patched sibling, strips `WINEDEBUG`/`MONO_GC_PARAMS` from `cxbottle.conf`, and restores `UnityCrashHandler64.exe` from `.disabled`. Backup files are preserved so you can re-run the patcher normally afterwards.
+
 ## After Game Updates
 
 Steam updates overwrite patched DLLs and `boot.config`. **Re-run the patcher after every CS2 update.** The patcher detects existing backups and re-patches cleanly.
@@ -47,7 +59,8 @@ Steam updates overwrite patched DLLs and `boot.config`. **Re-run the patcher aft
 
 | CS2 Version | Patcher Version | Status |
 |-------------|-----------------|--------|
-| v1.5.6f1 (Bridges & Ports) | v1.1.0 | Tested and working |
+| v1.5.6f1 (Bridges & Ports) | v1.1.1 | Tested and working |
+| v1.5.6f1 (Bridges & Ports) | v1.1.0 | **Broken — do not use** (malformed IL in Patch 11 causes `GameManager` NRE cascade) |
 | v1.5.6f1 (Bridges & Ports) | v1.0.0 | Tested and working |
 
 Future CS2 updates may shift IL offsets in patched DLLs. If the patcher reports warnings after an update, a new patcher version may be needed.
@@ -78,7 +91,6 @@ The Paradox SDK has two code paths for filesystem operations: standard .NET (`Sy
 | `system.reg` | `LongPathsEnabled=1` | Helps Wine's `\\?\` path handling |
 | `cxbottle.conf` | `UNITY_DISABLE_GRAPHICS_JOBS=1` | Additional D3DMetal stability |
 | `cxbottle.conf` | `WINEDEBUG=-all` | Suppress Wine debug I/O during heavy mod loading |
-| `cxbottle.conf` | `MONO_GC_PARAMS=max-heap-size=4096m` | Larger Mono heap for loading many mod assemblies |
 | `UnityCrashHandler64.exe` | Renamed to `.disabled` | Prevents hung-crash under Wine |
 
 ## Known Limitations
